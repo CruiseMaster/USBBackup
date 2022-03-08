@@ -1,6 +1,7 @@
 ﻿using Hardcodet.Wpf.TaskbarNotification;
 using Microsoft.Win32;
 using RoboSharp;
+using RoboSharp.EventArgObjects;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -39,6 +40,7 @@ namespace USBBackup
         private int RunningCopyOperations;
         private bool BaloonTipDisplayed;
         private static object lockObject;
+        private long TotalFilesToCopy;
 
 
         public MainWindow()
@@ -70,7 +72,6 @@ namespace USBBackup
             File.Copy(applicationLocation, System.IO.Path.Combine(programDataPath, "USBBackup", Application.ResourceAssembly.GetName().Name + ".exe"));
 
             string rootFolder = System.IO.Path.GetPathRoot(System.Reflection.Assembly.GetEntryAssembly().Location);
-            Directory.CreateDirectory(System.IO.Path.Combine(rootFolder, "USBBackup", uniqueIdentifyer.ToString()));
 
             RegistryKey softwareRegKey = Registry.CurrentUser.OpenSubKey("Software", true);
             if (!softwareRegKey.GetSubKeyNames().Contains("USBBackup"))
@@ -79,6 +80,15 @@ namespace USBBackup
                 softwareRegKey.OpenSubKey("USBBackup", true).SetValue("BackupFolder", Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), RegistryValueKind.String);
                 softwareRegKey.OpenSubKey("USBBackup", true).SetValue("Exclude", "AppData");
                 softwareRegKey.OpenSubKey("Microsoft", true).OpenSubKey("Windows", true).OpenSubKey("CurrentVersion", true).OpenSubKey("Run", true).SetValue("USB-Backup", System.IO.Path.Combine(programDataPath, "USBBackup", Application.ResourceAssembly.GetName().Name + ".exe"));
+            }
+            else
+            {
+                softwareRegKey = Registry.CurrentUser.OpenSubKey("Software").OpenSubKey("USBBackup");
+                string uniqueIdent = softwareRegKey.GetValue("UniqueIdentifyer", String.Empty).ToString();
+                if (uniqueIdent.Length < 1 || uniqueIdent.Equals(String.Empty))
+                    uniqueIdent = uniqueIdentifyer.ToString();
+
+                Directory.CreateDirectory(System.IO.Path.Combine(rootFolder, "USBBackup", uniqueIdent.ToString()));
             }
 
             softwareRegKey.Close();
@@ -156,7 +166,7 @@ namespace USBBackup
             }
         }
 
-        private void PerformBackup(object sender, EventArgs eventArgs)
+        private async void PerformBackup(object sender, EventArgs eventArgs)
         {
             taskbarIcon.TrayBalloonTipClicked -= PerformBackup;
             if (MessageBox.Show("Soll das Backup jetzt wirklich gestartet werden?", "Backup starten?", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
@@ -196,6 +206,7 @@ namespace USBBackup
 
             string rootBackupRoot = backupRoot;
             RunningCopyOperations = 0;
+            TotalFilesToCopy = 0;
 
             foreach (string backupSourceRoot in ApplicationConfiguration.BackupFolders)
             {
@@ -212,16 +223,32 @@ namespace USBBackup
                 robo.RetryOptions.RetryCount = 10;
                 robo.RetryOptions.RetryWaitTime = 5;
                 robo.SelectionOptions.ExcludeDirectories = exclusionString;
+                taskbarIcon.ToolTipText = "USB-Backup - Backup wird initialisiert...";
+                await robo.Start_ListOnly();
                 robo.OnCommandCompleted += Robo_OnCopyCompleted;
                 robo.OnCommandError += Robo_OnCopyError;
-                robo.OnFileProcessed += delegate (object o, RoboSharp.FileProcessedEventArgs e) { };
+                robo.OnFileProcessed += delegate (RoboCommand o, FileProcessedEventArgs e) { };
+                robo.OnProgressEstimatorCreated += (RoboCommand s, ProgressEstimatorCreatedEventArgs e) => { robo.IProgressEstimator.ValuesUpdated += IProgressEstimator_ValuesUpdated; };
+
+                TotalFilesToCopy += robo.GetResults().BytesStatistic.Total;
                 robo.Start();
                 taskbarIcon.ToolTipText = "USB-Backup - Backup läuft...";
                 RunningCopyOperations++;
             }
         }
 
-        private void Robo_OnCopyError(object sender, RoboSharp.ErrorEventArgs e)
+        private void IProgressEstimator_ValuesUpdated(RoboSharp.Interfaces.IProgressEstimator sender, RoboSharp.EventArgObjects.IProgressEstimatorUpdateEventArgs e)
+        {
+            Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                double percentage = ((double)e.BytesStatistic.Copied) / TotalFilesToCopy;
+                percentage *= 100;
+                percentage = Math.Round(percentage, 0);
+                taskbarIcon.ToolTipText = $"USB-Backup - Backup läuft - {percentage}% abgeschlossen.";
+            }), System.Windows.Threading.DispatcherPriority.Send);
+        }
+
+        private void Robo_OnCopyError(object sender, CommandErrorEventArgs e)
         {
             taskbarIcon.ShowBalloonTip("Backup fehlerhaft", "Die Erstellung des Backups schloss mit Fehlern ab.", BalloonIcon.Error);
         }
